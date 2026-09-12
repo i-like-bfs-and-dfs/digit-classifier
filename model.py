@@ -4,8 +4,6 @@ import torch.nn.functional as F
 
 from safetensors.torch import save_file, load_file
 
-from data import augment_
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class MLP(nn.Module):
@@ -49,8 +47,6 @@ class CNN(nn.Module):
         self._initialize_weights()
 
     def forward(self, x):
-        # if self.training:
-        #     x = augment_(x.clone())
         x = F.silu(self.bn1(self.conv1(x)))
         x = F.silu(self.bn2(self.conv2(x)))
         x = self.pool1(x)
@@ -77,6 +73,23 @@ class CNN(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+class CNNEmbeddings(nn.Module):
+    def __init__(self, cnn):
+        super().__init__()
+        self.cnn = cnn
+
+    def forward(self, x):
+        x = F.silu(self.cnn.bn1(self.cnn.conv1(x)))
+        x = F.silu(self.cnn.bn2(self.cnn.conv2(x)))
+        x = self.cnn.pool1(x)
+
+        x = F.silu(self.cnn.bn3(self.cnn.conv3(x)))
+        x = F.silu(self.cnn.bn4(self.cnn.conv4(x)))
+        x = self.cnn.pool2(x)
+
+        x = self.cnn.flatten(x)
+        x = self.cnn.fc1(x)
+        return torch.sigmoid(x)
 
 def dump(model, path):
     state_dict = model.state_dict()

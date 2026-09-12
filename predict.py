@@ -35,6 +35,24 @@ def generate_submission_csv(model, dataloader):
     df.to_csv(output_path, index=False)
     print(f"Saved submission to {output_path}")
 
+def evaluate_test(model, test_loader):
+    model.eval()
+    predictions_all = []
+    labels_all = []
+    with torch.no_grad():
+        correct = 0
+        total = 0
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            predictions_all.extend(predicted)
+            labels_all.extend(labels)
+    predictions_all, labels_all = torch.tensor(predictions_all), torch.tensor(labels_all)
+    return predictions_all, labels_all
+
 def main():
     model = load("results/model.safetensors")
     test_X = load_data(test_only=True)

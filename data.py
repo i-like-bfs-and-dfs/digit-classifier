@@ -4,11 +4,20 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+import faiss
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset
+from safetensors.torch import save_file, load_file
+
+from model import CNNEmbeddings, load
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+train_embedding_index = None
+train_embedding_model = None
+train_embedding_x = None
+train_embedding_y = None
 
 def to_img_tensor(df):
     t = torch.tensor(df.values, dtype=torch.float32) / 256.0
@@ -111,7 +120,7 @@ def augment_(X):
         padding_mode="zeros",
         align_corners=False,
     )
-    X_aug = random_mask(X_aug, x=3)
+    # X_aug = random_mask(X_aug, x=3)
     X_aug = add_gaussian_noise(X_aug)
     return X_aug
 
@@ -138,6 +147,76 @@ def create_loader_test(test_X):
     test_loader = DataLoader(dataset=test_dataset, batch_size=1000, shuffle=False)
     return test_loader
 
+def _embedding_db_paths(db_path):
+    return (
+        os.path.join(db_path, "index.faiss"),
+        os.path.join(db_path, "train_tensors.safetensors"),
+    )
+
+def _compute_embeddings(model, images, batch_size=1000):
+    embeddings = []
+    dataset = TensorDataset(images)
+    loader = DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False)
+
+    model.eval()
+    with torch.no_grad():
+        for (batch,) in loader:
+            batch = batch.to(device)
+            embedding = model(batch).detach().cpu().numpy().astype("float32")
+            embeddings.append(embedding)
+
+    return np.ascontiguousarray(np.concatenate(embeddings, axis=0))
+
+def store_train_embeddings(train_loader, model, db_path="results/train_embeddings"):
+    global train_embedding_index, train_embedding_model, train_embedding_x, train_embedding_y
+
+    index_path, tensors_path = _embedding_db_paths(db_path)
+    os.makedirs(db_path, exist_ok=True)
+
+    train_x = []
+    train_y = []
+    embeddings = []
+
+    train_embedding_model = CNNEmbeddings(model).to(device)
+    train_embedding_model.eval()
+    with torch.no_grad():
+        for images, labels in train_loader:
+            train_x.append(images.detach().cpu())
+            train_y.append(labels.detach().cpu())
+            images = images.to(device)
+            embedding = train_embedding_model(images).detach().cpu().numpy().astype("float32")
+            embeddings.append(embedding)
+
+    train_embedding_x = torch.cat(train_x, dim=0)
+    train_embedding_y = torch.cat(train_y, dim=0)
+    embeddings = np.ascontiguousarray(np.concatenate(embeddings, axis=0))
+
+    train_embedding_index = faiss.IndexFlatL2(embeddings.shape[1])
+    train_embedding_index.add(embeddings)
+
+    faiss.write_index(train_embedding_index, index_path)
+    save_file({"train_x": train_embedding_x.contiguous(), "train_y": train_embedding_y.contiguous()}, tensors_path)
+    return train_embedding_index
+
+def search_train_embeddings(test_images, model, k=5, db_path="results/train_embeddings"):
+    global train_embedding_index, train_embedding_model, train_embedding_x, train_embedding_y
+
+    index_path, tensors_path = _embedding_db_paths(db_path)
+    if not os.path.exists(index_path) or not os.path.exists(tensors_path):
+        raise FileNotFoundError("call store_train_embeddings(train_loader, model, db_path) before searching")
+
+    train_embedding_index = faiss.read_index(index_path)
+    tensors = load_file(tensors_path, device="cpu")
+    train_embedding_x = tensors["train_x"]
+    train_embedding_y = tensors["train_y"]
+
+    train_embedding_model = CNNEmbeddings(model).to(device)
+    k = min(k, train_embedding_index.ntotal)
+    embeddings = _compute_embeddings(train_embedding_model, test_images)
+    _, indices = train_embedding_index.search(embeddings, k)
+    indices = torch.tensor(indices, dtype=torch.long)
+    return train_embedding_x[indices], train_embedding_y[indices]
+
 class DigitDataset(Dataset):
     def __init__(self, df, train=True):
         self.train = train
@@ -159,8 +238,3 @@ class DigitDataset(Dataset):
             return img_tensor, label
         else:
             return img_tensor
-
-# def create_loader(df, batch_size=128, train=True):
-#     dataset = DigitDataset(df, train=train)
-#     loader = DataLoader(dataset, batch_size=batch_size, shuffle=train)
-#     return loader
